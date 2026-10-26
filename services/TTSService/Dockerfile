@@ -31,6 +31,7 @@ RUN pip install /shared
 # Copy service files
 COPY services/TTSService/main.py ./
 COPY services/TTSService/flowspeech.py ./
+COPY services/TTSService/flowspeech_v1.py ./
 
 EXPOSE 8889
 

@@ -9,9 +9,14 @@ import httpx
 from elevenlabs.client import ElevenLabs
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import Response
-from flowspeech import FlowSpeechAudio, FlowSpeechClient, pcm_to_wav
+from flowspeech import (
+    FlowSpeechClient,
+    dialogue_segments,
+    pcm_to_wav,
+    request_id_for_job,
+)
 from opentelemetry.trace.status import StatusCode
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from shared.api_types import JobStatus, ServiceType
 from shared.job import JobStatusManager
 from shared.otel import OpenTelemetryConfig, OpenTelemetryInstrumentation
@@ -55,12 +60,20 @@ job_manager = JobStatusManager(ServiceType.TTS, telemetry=telemetry)
 
 
 class DialogueEntry(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid" if TTS_PROVIDER == "flowspeech" else "ignore",
+        strict=TTS_PROVIDER == "flowspeech",
+    )
     text: str
     speaker: str
     voice_id: Optional[str] = None
 
 
 class TTSRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid" if TTS_PROVIDER == "flowspeech" else "ignore",
+        strict=TTS_PROVIDER == "flowspeech",
+    )
     dialogue: List[DialogueEntry]
     job_id: str
     scratchpad: Optional[str] = ""
@@ -88,6 +101,7 @@ class TTSService:
                 api_key=os.getenv("FLOWSPEECH_API_KEY", ""),
                 base_url=os.getenv("FLOWSPEECH_BASE_URL", "https://flowspeech.io"),
                 httpx_client=self.httpx_client,
+                timeout=float(os.getenv("FLOWSPEECH_TIMEOUT", "300")),
             )
         else:
             self.eleven_labs_client = ElevenLabs(
@@ -97,6 +111,8 @@ class TTSService:
             )
 
     def __exit__(self):
+        if self.flow_speech_client:
+            self.flow_speech_client.close()
         self.httpx_client.close()
 
     @lru_cache(maxsize=1)
@@ -106,15 +122,11 @@ class TTSService:
             if self.flow_speech_client:
                 return [
                     VoiceInfo(
-                        voice_id=DEFAULT_VOICE_1,
-                        name=DEFAULT_VOICE_1,
-                        description="Default speaker 1 voice",
-                    ),
-                    VoiceInfo(
-                        voice_id=DEFAULT_VOICE_2,
-                        name=DEFAULT_VOICE_2,
-                        description="Default speaker 2 voice",
-                    ),
+                        voice_id=voice["name"],
+                        name=voice["name"],
+                        description=voice.get("description"),
+                    )
+                    for voice in self.flow_speech_client.voices()
                 ]
             try:
                 response = self.eleven_labs_client.voices.get_all()
@@ -152,13 +164,19 @@ class TTSService:
         """Process TTS job"""
         with telemetry.tracer.start_as_current_span("tts.process_job") as span:
             try:
-                voice_mapping = request.voice_mapping
+                voice_mapping = (
+                    DEFAULT_VOICE_MAPPING
+                    if request.voice_mapping is None
+                    else request.voice_mapping
+                )
                 # Validate voice mapping against available voices
                 available_voices = self.get_available_voices()
                 available_voice_ids = {voice.voice_id for voice in available_voices}
                 invalid_voices = set(voice_mapping.values()) - available_voice_ids
 
                 if invalid_voices:
+                    if self.flow_speech_client:
+                        raise ValueError("Unknown FlowSpeech voice in voice_mapping")
                     span.set_attribute("invalid_voices", invalid_voices)
                     logger.warning(
                         f"Using default voices. Invalid voice IDs: {invalid_voices}"
@@ -192,6 +210,22 @@ class TTSService:
     async def _process_dialogue(
         self, job_id: str, dialogue: List[DialogueEntry], voice_mapping: Dict[str, str]
     ) -> bytes:
+        if self.flow_speech_client:
+            segments = dialogue_segments(dialogue, voice_mapping)
+            request_id = request_id_for_job(job_id)
+            job_manager.update_status(
+                job_id,
+                JobStatus.PROCESSING,
+                f"FlowSpeech request_id={request_id}; retain this ID for recovery",
+            )
+            # One ordered multi-speaker job, not one paid recording per turn.
+            audio = await asyncio.get_running_loop().run_in_executor(
+                self.thread_pool,
+                lambda: self.flow_speech_client.convert_multi(
+                    segments, request_id=request_id
+                ),
+            )
+            return pcm_to_wav(audio)
         combined_audio = b""
         with telemetry.tracer.start_as_current_span("tts.process_dialogue") as span:
             tasks = [
@@ -224,21 +258,14 @@ class TTSService:
                         None, future.result
                     )
 
-            if self.flow_speech_client:
-                return pcm_to_wav(
-                    FlowSpeechAudio(
-                        pcm=combined_audio,
-                        sample_rate=24000,
-                        channels=1,
-                        bits_per_sample=16,
-                    )
-                )
             return combined_audio
 
-    def _convert_text(self, text: str, voice_id: str) -> bytes:
+    def _convert_text(self, text: str, voice_id: str, *, request_id=None) -> bytes:
         """Convert text to speech using the configured provider."""
         if self.flow_speech_client:
-            return self.flow_speech_client.convert(text, voice_id).pcm
+            return self.flow_speech_client.convert(
+                text, voice_id, request_id=request_id
+            ).pcm
 
         audio_stream = self.eleven_labs_client.text_to_speech.convert(
             text=text,
@@ -265,10 +292,22 @@ async def list_voices() -> List[VoiceInfo]:
 async def generate_tts(request: TTSRequest, background_tasks: BackgroundTasks):
     """Start TTS generation job"""
     with telemetry.tracer.start_as_current_span("tts.generate_tts") as span:
+        recovery = {}
+        if TTS_PROVIDER == "flowspeech":
+            try:
+                dialogue_segments(
+                    request.dialogue,
+                    DEFAULT_VOICE_MAPPING
+                    if request.voice_mapping is None
+                    else request.voice_mapping,
+                )
+                recovery["flowspeech_request_id"] = request_id_for_job(request.job_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         span.set_attribute("job_id", request.job_id)
         job_manager.create_job(request.job_id)
         background_tasks.add_task(tts_service.process_job, request.job_id, request)
-        return {"job_id": request.job_id}
+        return {"job_id": request.job_id, **recovery}
 
 
 @app.get("/status/{job_id}")

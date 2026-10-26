@@ -113,6 +113,12 @@ set `TTS_PROVIDER=flowspeech` as shown below.
    echo "DEFAULT_VOICE_2=Puck" >> .env
    ```
 
+   FlowSpeech requires an active API subscription and credits. Its v1 integration
+   submits one ordered multi-speaker job per podcast and returns validated
+   24 kHz mono 16-bit WAV. The accepted response includes
+   `flowspeech_request_id`; keep it for recovery. See the
+   [TTS service recovery guide](services/TTSService/README.md).
+
 5. **Install dependencies**
 
 We use UV to manage Python dependencies.
