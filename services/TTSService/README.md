@@ -56,6 +56,18 @@ worker can finish that one in-flight request, but cannot retry or start another
 recording in the background. Retries preserve UUID and body, respect cooldowns
 even after body-read errors, and never poll faster than five seconds.
 
+The loaded adapter module admits at most eight HTTP workers without a task
+queue. Normal calls can run concurrently within that bound. Full capacity or
+any timed-out worker still finishing on the same client produces `client_busy`
+before another request is sent. Retain the original request ID and recover when
+capacity becomes available. Closing the adapter defers owned-client cleanup
+until its active workers exit and never closes a caller-owned HTTP client.
+
+API exceptions use local messages, not upstream error prose. Diagnostic code and
+trace tokens are limited to 128 ASCII letters, digits, underscores or hyphens,
+and values containing the configured API key are omitted. Signed URLs are not
+included in these diagnostics; result URLs retained for recovery remain private.
+
 Result metadata and the complete WAV container are validated before use:
 24 kHz, mono, 16-bit PCM, complete chunks and nonempty aligned sample data.
 Downloads are bounded and credential-free, including validated HTTPS redirects.

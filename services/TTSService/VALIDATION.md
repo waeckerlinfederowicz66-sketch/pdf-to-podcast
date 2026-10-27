@@ -1,5 +1,60 @@
 # FlowSpeech v1 Migration Handoff
 
+## Unreleased Candidate Verification (2026-10-27)
+
+This section records the current local candidate, not a published fix. Runtime
+source was not changed during this artifact/evidence refresh. The independently
+reviewed source suite passed 253 tests; this refresh rebuilt a separately named
+candidate and passed **253 extracted-runtime tests, zero failures**.
+
+Candidate: `services/TTSService/dist/unreleased-20261027-final/flowspeech-v1-tts-review.tar.gz`
+
+SHA-256: `5875b985d3d50b55a26d3a38730e2308c6a3f593d2605cb3a6043290a9b9d51c`
+
+Frozen `flowspeech_v1.py` SHA-256:
+`ccf5ede19867d355c7d773b234d8f7df4c6cc66e2d699b0666336a93511a618c`
+
+The existing six-file allowlist matched the extracted archive and source byte
+for byte. The credential-pattern scan passed. Current local tests (including
+worker lifecycle and error privacy regressions) were run against the extracted
+runtime via `FLOWSPEECH_TEST_ROOT`; tests and local verification helpers are not
+included in the archive. This is source validation, not deployment validation.
+
+### Command and Local Evidence
+
+From the repository root, set `PY` to the existing Python 3.12.1 test interpreter
+with HTTPX 0.28.1 and pytest 9.0.3:
+
+```bash
+env -i PATH=/usr/bin:/bin HOME=/private/tmp PYTHONDONTWRITEBYTECODE=1 "$PY" services/TTSService/dist/verify_unreleased_20261027.py unreleased-20261027-final
+```
+
+The local-only wrapper uses the unchanged `verify_bundle.py` with a new output
+path, refuses an existing candidate directory, and verifies that the previous
+fixed-path archive and frozen runtime hash remain unchanged. For another run,
+use a fresh directory label instead of overwriting this evidence. Its
+`validation.json` is alongside the candidate. Generated helpers, archives and
+evidence under `dist/` are local artifacts, not files to stage or publish.
+
+### Historical Evidence and Limits
+
+The 2026-10-26 section below is retained verbatim as historical evidence; its
+test counts and archive hash do not describe this candidate. Before this refresh,
+earlier verification had already regenerated the fixed-name archive, so the
+original 26 October archive bytes are no longer present at that path. This
+refresh preserves the existing fixed-name file, whose SHA-256 equals the new
+candidate SHA-256 above. It does not reconstruct or claim to revalidate the
+historical archive.
+
+No API keys, paid generation, commits, pushes, publishes, or version changes
+were involved. No full Docker build/startup or deployed service validation was performed.
+Independent cross-review covered source, not this new archive. A blocked sync
+transport can finish its one in-flight operation after caller timeout; workers
+remain bounded, with no queued late submission and no caller-owned client close.
+
+## Historical Handoff (2026-10-26)
+
+
 Date: 2026-10-26. Branch: `codex/add-flowspeech-tts-provider`.
 Base commit: `85916f5fed436fba253bc7fa7efd070b8b0f88dd`.
 Existing PR: https://github.com/NVIDIA-AI-Blueprints/pdf-to-podcast/pull/31
